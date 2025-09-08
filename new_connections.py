@@ -4,106 +4,82 @@ import stat
 from pathlib import Path
 
 import paramiko
-from salt.grains.napalm import username
 
 logger = logging.getLogger(__name__)
 
+
 class ConnectionManager:
-
-
-    @staticmethod
-    def send_command(host: str, user: str, password: str, command: str) -> str:
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())  # accept unknown hosts
-
-        try:
-            client.connect(
-                hostname=host,
-                username=user,
-                password=password,
-                look_for_keys=False,
-                allow_agent=False)
-            logger.info(f'connecting to {user}@{host}')
-            stdin, stdout, stderr = client.exec_command(command)
-
-            # Read outputs
-            out = stdout.read().decode("utf-8")
-            err = stderr.read().decode("utf-8")
-
-            return f'stdout: {out}\nstderr: {err}'
-        except Exception as e:
-            raise e
-        finally:
-            client.close()
-
-    @staticmethod
-    def connect_sftp(hostname, username, password, port=22, timeout=10):
-        """
-        Establish SSH + SFTP connection.
-        Returns (client, sftp).
-        """
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(
+    def __init__(self, hostname, username, password, port=22, timeout=10):
+        """Initialize SSH and SFTP clients for the given host."""
+        self.client = paramiko.SSHClient()
+        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        self.client.connect(
             hostname=hostname,
             port=port,
             username=username,
             password=password,
             timeout=timeout,
             look_for_keys=False,
-            allow_agent=False
+            allow_agent=False,
         )
-        return client, client.open_sftp()
+        self.sftp = self.client.open_sftp()
+
+    def close(self):
+        """Close the underlying SSH and SFTP connections."""
+        self.sftp.close()
+        self.client.close()
+
+    def send_command(self, command: str) -> str:
+        """Execute a command on the remote host and return stdout/stderr."""
+        try:
+            logger.info("connecting to host to run command")
+            stdin, stdout, stderr = self.client.exec_command(command)
+
+            out = stdout.read().decode("utf-8")
+            err = stderr.read().decode("utf-8")
+
+            return f"stdout: {out}\nstderr: {err}"
+        except Exception as e:
+            raise e
 
     # ----------------- File Operations ----------------- #
 
-    @staticmethod
-    def upload_file( hostname: str, username: str, password: str, local_path: str, remote_path: str):
-        client, sftp = ConnectionManager.connect_sftp(hostname=hostname, username=username, password=password)
-        sftp.put(local_path, remote_path)
-        client.close()
+    def upload_file(self, local_path: str, remote_path: str):
+        self.sftp.put(local_path, remote_path)
 
-    @staticmethod
-    def download_file(hostname: str,username: str, password: str, remote_path, local_path):
-        client, sftp = ConnectionManager.connect_sftp(hostname=hostname, username=username, password=password)
-        sftp.get(remote_path, local_path)
-        client.close()
+    def download_file(self, remote_path, local_path):
+        self.sftp.get(remote_path, local_path)
 
     # ----------------- Directory Operations ----------------- #
 
-    @staticmethod
-    def upload_dir(hostname: str,username: str, password: str, remote_dir, local_dir):
-        client, sftp = ConnectionManager.connect_sftp(hostname=hostname, username=username, password=password)
-
-        """Recursively upload directory."""
+    def upload_dir(self, remote_dir, local_dir):
+        """Recursively upload a directory."""
         try:
-            sftp.chdir(remote_dir)
+            self.sftp.chdir(remote_dir)
         except IOError:
-            sftp.mkdir(remote_dir)
-            sftp.chdir(remote_dir)
+            self.sftp.mkdir(remote_dir)
+            self.sftp.chdir(remote_dir)
 
         for item in os.listdir(local_dir):
             local_path = os.path.join(local_dir, item)
             remote_path = remote_dir + "/" + item
             if os.path.isfile(local_path):
-                sftp.put(local_path, remote_path)
+                self.sftp.put(local_path, remote_path)
             else:
-                ConnectionManager.upload_dir(sftp, local_path, remote_path)
-        client.close()
+                self.upload_dir(remote_path, local_path)
 
-    @staticmethod
-    def download_dir(sftp, remote_dir, local_dir):
-        """Recursively download directory."""
+    def download_dir(self, remote_dir, local_dir):
+        """Recursively download a directory."""
         if not os.path.exists(local_dir):
             os.makedirs(local_dir)
 
-        for item in sftp.listdir_attr(remote_dir):
+        for item in self.sftp.listdir_attr(remote_dir):
             remote_path = remote_dir + "/" + item.filename
             local_path = os.path.join(local_dir, item.filename)
             if stat.S_ISDIR(item.st_mode):
-                ConnectionManager.download_dir(sftp, remote_path, local_path)
+                self.download_dir(remote_path, local_path)
             else:
-                sftp.get(remote_path, local_path)
+                self.sftp.get(remote_path, local_path)
 
 
 if __name__ == "__main__":
@@ -114,6 +90,8 @@ if __name__ == "__main__":
     project_root = script_path.parent.parent  # Adjust .parent calls as needed to reach your desired root
     data_dir = project_root / "utils" / "local_utils"
     remote_dir = "/home/local_utils/"
-    ConnectionManager.upload_dir(host, username, password,remote_dir, data_dir)
+    manager = ConnectionManager(host, username, password)
+    manager.upload_dir(remote_dir, data_dir)
     command = "python3 /home/local_utils/traps_installer.py -ver 9.0.0.138540"
-    ConnectionManager.send_command(host, username, password, command)
+    manager.send_command(command)
+    manager.close()
